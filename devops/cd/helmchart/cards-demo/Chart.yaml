@@ -1,0 +1,9 @@
+apiVersion: v1
+appVersion: "1.0"
+description: A Helm chart for microservice deployment on ICP kubernetes
+name: cards-demo
+icon: https://github.ibm.com/DIP/static_files/blob/master/devops.png?raw=true
+version: 0.1.0
+maintainers:
+- email: alokadhao@in.ibm.com
+  name: Alok Adhao

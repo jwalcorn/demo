@@ -1,0 +1,25 @@
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app: {{ .Values.microservice.Name }}
+  name: {{ .Values.microservice.Name }}-svc
+  namespace: {{ .Values.microservice.namespace }}
+spec:
+  ports:
+  - name: {{ .Values.microservice.Name }}-port1
+    port: {{ .Values.microservice.containerport }}
+    protocol: TCP
+    targetPort: {{ .Values.microservice.containerport }}
+    nodePort: {{ .Values.microservice.port }}
+  {{- if .Values.microservice.httpsport }} 
+  - name: {{ .Values.microservice.Name }}-port2
+    port: {{ .Values.microservice.containerporthttps }}
+    protocol: TCP
+    targetPort: {{ .Values.microservice.containerporthttps }}
+    nodePort: {{ .Values.microservice.httpsport }}
+  {{- end }}  
+  selector:
+    app: {{ .Values.microservice.Name }}
+  sessionAffinity: None
+  type: {{ .Values.microservice.type }}

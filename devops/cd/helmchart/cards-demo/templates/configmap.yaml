@@ -1,0 +1,12 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  labels:
+    app: {{ .Values.microservice.Name }}
+  name: {{ .Values.microservice.Name }}configmap
+  namespace: {{ .Values.microservice.namespace }}
+data:
+  application.properties: |-
+    spring.data.mongodb.host={{ .Values.microservice.dataSourceHost }}
+    spring.data.mongodb.port={{ .Values.microservice.dataSourcePort }}
+    spring.data.mongodb.database={{ .Values.microservice.database }}

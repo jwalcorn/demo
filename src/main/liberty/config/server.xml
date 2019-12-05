@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<server description="cards-demo">
+
+	<featureManager>
+		<feature>microProfile-3.0</feature>
+		<feature>usr:opentracingZipkin-0.31</feature>
+	</featureManager>
+	<variable name="defaultHostName" value="0.0.0.0" />
+	<quickStartSecurity userName="admin"
+		userPassword="adminpwd" />
+	<keyStore id="defaultKeyStore" password="mpKeystore" />
+	<httpEndpoint id="defaultHttpEndpoint"
+		httpPort="${httpPort}" httpsPort="${httpsPort}">
+	</httpEndpoint>
+
+	<application location="./cards-demo.war" />
+
+	<opentracingZipkin host="${env.ZIPKIN_HOST}" port="${env.ZIPKIN_PORT}" />
+</server>

@@ -1,0 +1,136 @@
+def workspace;
+def props='';
+def branchName;
+def commit_username;
+def commit_Email;
+def imageName;
+def propsvault;
+def dockerRegistry;
+
+node {
+
+				stage('Checkout Code')
+    {
+			try
+			{
+				checkout scm
+				props = readProperties  file: """devops/deploy.properties"""
+				workspace = pwd ()
+				branchName=sh(returnStdout: true, script: 'git symbolic-ref --short HEAD').trim()
+				commit_username=sh(returnStdout: true, script: '''username=$(git log -1 --pretty=%ae) 
+				echo ${username%@*} ''').trim();
+				commit_Email=sh(returnStdout: true, script: '''Email=$(git log -1 --pretty=%ae) 								
+				echo $Email''').trim();				
+				echo commit_username
+				echo commit_Email
+				withCredentials([string(credentialsId: 'vaultToken', variable: 'vaultCredentials')]) {
+					sh """
+						curl \
+						--header "X-Vault-Token: ${vaultCredentials}" \
+						--request GET \
+						http://9.109.190.138:8200/v1/secret/data/code-engine-demo > vault.json
+						"""
+					def json=readJSON file: 'vault.json'
+					def data = json.data.data
+					writeYaml file: 'credential.properties', data: data
+				}
+			propsvault = readProperties  file: """credential.properties"""
+			} catch (e) {
+				throwError("Checkout Code",e)
+			} catch (error) {
+					currentBuild.result='FAILURE'
+					sh """rm -rf  credential.properties vault.json"""
+					echo "Error occurred in Checkout Code stage"
+					echo """${error.getMessage()}"""
+					throw error
+			}
+    }
+			
+						stage ('Static Code Analysis') { 
+   try{
+    sh """echo ${workspace}"""
+	def scannerHome = tool 'sonar-runner';
+	withSonarQubeEnv('Dockersonar') 
+		{
+   		  sh """
+   		  	${scannerHome}/bin/sonar-runner -D sonar.host.url=${Dockersonar} -D sonar.login=${propsvault['sonarUsername'].trim()} -D sonar.password=${propsvault['sonarPassword'].trim()} -Dproject.settings=devops/ci/sonar-project.properties
+		  """
+		}
+
+	/*timeout(time: 1, unit: 'MINUTES')
+        {
+              def qg = waitForQualityGate()
+              if (qg.status != 'OK') {
+              error "Pipeline aborted due to quality gate failure"
+              }
+        }*/
+	}	catch (e) {
+		throwError("Static Code Analysis",e)
+	}
+ }
+				
+					stage ('Build') { 
+	try	{
+		sh """mvn clean test"""
+	} catch (e) {
+		throwError("Build",e)
+	}
+ 
+}
+			
+					stage ('Unit Test Execution'){ 
+  try {
+	   echo "Unit Test Execution"
+    } 	catch (e) {
+		throwError("Unit Testing",e)
+	}
+}
+				
+					stage ('Code Coverage'){ 
+try {
+		def scannerHome = tool 'sonar-runner';
+		withSonarQubeEnv('Dockersonar') 
+		{
+			sh """	
+				${scannerHome}/bin/sonar-runner -D sonar.host.url=${Dockersonar} -D sonar.login=${propsvault['sonarUsername'].trim()} -D sonar.password=${propsvault['sonarPassword'].trim()} -D sonar.java.binaries=target/classes -D sonar.jacoco.reportPaths=target/jacoco.exec -Dproject.settings=devops/ci/sonar-project.properties
+			"""
+		}			
+    }	catch (e) {
+			throwError("Code Coverage",e)
+	}
+}
+			
+					stage ('Create Docker Image'){ 
+			try {
+				imageName="""${props['deploy.dockerRegistry']}/${props['deploy.app']}:${props['api.version']}"""
+				sh """
+					mvn package					
+					sudo docker build -t ${imageName} -f devops/ci/Dockerfile .					
+				"""
+			}	catch (e) {
+    			throwError("Create Package",e)
+			}
+    }
+				
+					stage ('Push Image to Docker Registry')
+    { 
+       try {
+	   
+			sh """sudo docker push ${imageName}"""
+			sh """rm -rf  credential.properties vault.json"""
+        }
+    	catch (e) {
+    		throwError("Moving Image to Docker Registry",e)
+    	}
+    }
+	
+
+}
+def throwError(String errMsg,e)
+{
+	currentBuild.result='FAILURE'
+	sh """rm -rf  credential.properties vault.json"""
+	echo "Error occurred in ${errMsg} stage"
+	echo """${e.getMessage()}"""
+    throw e
+}

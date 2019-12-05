@@ -1,0 +1,202 @@
+- hosts: targetserver
+  remote_user: ibmadmin
+  vars_files:
+    - external_vars.yml
+  vars:
+    app_name: "{{ API_NAME }}"
+    dockerRegistryHost: "{{ REGISTRY_HOST_AND_PORT }}"
+    imageTag: "{{ IMAGE_TAG }}"
+    porttodeploy: "{{ PORT_TO_DEPLOY_CONTAINER }}"
+    foldername: "{{ FOLDER_NAME }}"
+    runId: "{{ RUNID }}"
+    namespace: "{{ NAMESPACE }}"
+    implementationType: "{{ IMPLEMENTATION_TYPE }}"
+    porttodeploymicro: "{{ PORT_TO_DEPLOY_CONTAINER_MICRO }}"
+    dynamicPortUpdateURL: "{{ DYNAMIC_PORT_UPDATEA_URL }}"
+
+  tasks:
+    - name: debug app_name
+      debug:
+        var: app_name
+    - name: debug REGISTRY_HOST_AND_PORT
+      debug:
+        var: dockerRegistryHost
+    - name: debug IMAGE_TAG
+      debug:
+        var: imageTag
+    - name: debug porttodeploy
+      debug:
+        var: porttodeploy
+    - name: debug namespace
+      debug:
+        var: namespace
+    - name: implementationType
+      debug:
+        var: implementationType
+    - name: porttodeploymicro
+      debug:
+        var: porttodeploymicro
+    - name: dynamicPortUpdateURL
+      debug:
+        var: dynamicPortUpdateURL
+        
+
+    - name: Check if helm chart is present
+      shell: 'helm list | grep -w {{ app_name }}'
+      register: helmChartStatus
+      ignore_errors: True
+
+    - name:  Debug helmChartStatus when result is failed
+      debug:
+        var: helmChartStatus
+      when: helmChartStatus is failed
+
+    - name:  Debug helmChartStatus when result is succeeded
+      debug:
+        var: helmChartStatus
+      when: helmChartStatus is succeeded
+
+    - name: debug helmChartStatus output lines
+      set_fact:
+        datacont: "{{ helmChartStatus.stdout_lines | length }}"
+      register: containerslength
+    
+    - name:  containerslength debug 1
+      debug:
+        var: datacont
+
+    - name: Helm chart NOT present
+      debug:
+        msg: "Helm chart NOT present "
+      when: datacont == "0"
+
+    - name: HELM chart persent already
+      debug:
+        msg: " HELM chart persent already"
+      when: datacont != "0"
+
+    - name: Creates directory
+      file:
+        path: /home/ibmadmin/ansibleDirTarget/{{ foldername }}
+        state: directory
+
+    - name: Copying helmchart file to target machine
+      copy: src=/home/ibmadmin/ansibleDir/{{ foldername }}/helmchart dest=/home/ibmadmin/ansibleDirTarget/{{ foldername }}/
+
+    # Setting dynamic http port if not present start
+    - name: setting http port to port1present
+      set_fact: port1present={{ porttodeploy }}
+
+    - name: "port1 or http is not given by user"
+      debug:
+        msg: "port1 or http is not given by user"
+      when: port1present == ""
+
+    - name: get free port1 from server
+      shell: |
+        PORT2="`shuf -i 30020-32200 -n 1`"
+        ss -lpn | grep -q ":$PORT2 " || break
+        echo $PORT2
+      register: dynamicfreeport1
+      when: port1present == ""
+
+    - name: debug dynamicfreeport1
+      debug:
+        var: dynamicfreeport1.stdout
+      when: port1present == ""
+
+    - name: set dynamicfreeport1 as port1 or http port
+      set_fact: porttodeploy={{ dynamicfreeport1.stdout }}
+      when: port1present == ""
+
+    - name: debug porttodeploy
+      debug:
+        var: porttodeploy
+    # Setting dynamic http port if not present ends
+
+    - name: replace http port no
+      replace:
+        path: /home/ibmadmin/ansibleDirTarget/{{ foldername }}/helmchart/{{ app_name }}/values.yaml
+        regexp: 'PortNo'
+        replace: '{{ porttodeploy }}'
+
+    # Setting dynamic https port if not present start
+    - name: setting https port to port2present
+      set_fact: port2present={{ porttodeploymicro }}
+
+    - name: "port2 or https is not given by user"
+      debug:
+        msg: "port2 or https is not given by user"
+      when: (port2present == "") and (implementationType == "microprofile")
+
+    - name: get free port2 from server
+      shell: |
+        PORT2="`shuf -i 30020-32200 -n 1`"
+        ss -lpn | grep -q ":$PORT2 " || break
+        echo $PORT2
+      register: dynamicfreeport2
+      when: (port2present == "") and (implementationType == "microprofile")
+
+    - name: debug dynamicfreeport2
+      debug:
+        var: dynamicfreeport2.stdout
+      when: (port2present == "") and (implementationType == "microprofile")
+
+    - name: set dynamicfreeport2 as port2 or htts port
+      set_fact: porttodeploymicro={{ dynamicfreeport2.stdout }}
+      when: (port2present == "") and (implementationType == "microprofile")
+
+    - name: debug porttodeploymicro
+      debug:
+        var: porttodeploymicro
+      when: implementationType == "microprofile"
+    # Setting dynamic https port if not present end
+
+    - name: replace https port no
+      replace:
+        path: /home/ibmadmin/ansibleDirTarget/{{ foldername }}/helmchart/{{ app_name }}/values.yaml
+        regexp: 'PortsNo'
+        replace: '{{ porttodeploymicro }}'
+      when: implementationType == "microprofile"
+
+    - name: Delete keys in sysadmin/.ssh/authoriezd_keys
+      lineinfile: dest=/home/ibmadmin/ansibleDirTarget/{{ foldername }}/helmchart/{{ app_name }}/values.yaml
+        state=absent
+        regexp='PortsNo'
+      when: implementationType == "springboot"
+
+    - name: Install helm chart
+      shell: 'helm install /home/ibmadmin/ansibleDirTarget/{{ foldername }}/helmchart/{{ app_name }} --name {{ app_name }} --namespace {{ namespace }}'
+      register: helmChartStatus
+      when: datacont == "0"
+
+    - name: Update helm chart
+      shell: 'helm upgrade {{ app_name }} /home/ibmadmin/ansibleDirTarget/{{ foldername }}/helmchart/{{ app_name }}'
+      register: helmChartStatus
+      when: datacont != "0"
+
+    - name: Updating port on which container deployed to run management endpoint or springboot
+      uri:
+        url: http://{{ dynamicPortUpdateURL }}/ports?runId={{ runId }}&httpPort={{  porttodeploy }}
+        method: PUT
+      register: postToRunID
+      when: implementationType == "springboot"
+
+    - name: Debug status of update port to runid
+      debug:
+        var: postToRunID
+      when: implementationType == "springboot"
+
+    - name: Updating port on which container deployed to run management endpoint or microprofile
+      uri:
+        url: http://{{ dynamicPortUpdateURL }}/ports?runId={{ runId }}&httpPort={{  porttodeploy }}&httpsPort={{  porttodeploymicro }}
+        method: PUT
+      register: postToRunIDMicro
+      when: implementationType == "microprofile"
+
+    - name: Debug status of port no sent to run management microprofile
+      debug:
+        var: postToRunIDMicro
+      when: implementationType == "microprofile"
+
+    

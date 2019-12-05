@@ -1,0 +1,355 @@
+def  readconfigfile='', configserveruri='';
+def appDeployProcess;
+def props;
+def propsvault;
+node {
+
+				stage('Pulling deployment details') {
+		withCredentials([usernamePassword(credentialsId: 'demomongodb', passwordVariable: 'mongoPassword', usernameVariable: 'mongoUsername')]) {
+			try {
+				//checkout([$class: 'GitSCM', branches: [[name: '*/master']], doGenerateSubmoduleConfigurations: false, extensions: [[$class: 'LocalBranch', localBranch: '**']], submoduleCfg: [], userRemoteConfigs: [[url: '${gitRepoURL}']]])
+				checkout scm
+				props = readProperties  file: """devops/deploy.properties"""
+				withCredentials([string(credentialsId: 'vaultToken', variable: 'vaultCredentials')]) {
+					sh """
+						curl \
+						--header "X-Vault-Token: ${vaultCredentials}" \
+						--request GET \
+						http://9.109.190.138:8200/v1/secret/data/code-engine-demo > vault.json
+						"""
+					def json=readJSON file: 'vault.json'
+					def data = json.data.data
+					writeYaml file: 'credential.properties', data: data
+				}
+			propsvault = readProperties  file: """credential.properties"""
+			configserveruri = getEnvironmentConfig("""${propsvault['mongoIP'].trim()}""","""${propsvault['mongoPort'].trim()}""", """${propsvault['mongoUsername'].trim()}""", """${propsvault['mongoPassword'].trim()}""", """${propsvault['mongoDBName'].trim()}""", """${propsvault['mongoCollectionEnvironments'].trim()}""", props['deploy.defaultEnvironment'])
+			readconfigfile = readJSON file: 'config.properties.json'
+			//sh """git pull origin ${branchName}"""
+			}
+			catch (e) {
+					currentBuild.result='FAILURE'
+					sh """rm -rf  credential.properties vault.json"""
+					//logJIRATicket(currentBuild.result, "At Stage Checkout Code", props['JIRAprojectid'], props['JIRAissuetype'], commit_Email, props['JIRAissuereporter'])
+					//notifyBuild(currentBuild.result, "At Stage Checkout Code", "", commit_Email)
+					echo """${e.getMessage()}"""
+					throw e
+			}
+			catch (error) {
+					currentBuild.result='FAILURE'
+					sh """rm -rf  credential.properties vault.json"""
+					//logJIRATicket(currentBuild.result, "At Stage Checkout Code", props['build.JIRAprojectid'], props['build.JIRAissuetype'], commit_Email, props['build.JIRAissuereporter'])
+					//notifyBuild(currentBuild.result, "At Stage Checkout Code", "", commit_Email)
+					echo """${error.getMessage()}"""
+					throw error
+			}
+		}
+	}
+			
+							 stage ('Deploy to Kubernetes ansible') { 
+	try {		
+		def deployAppName = """${props['deploy.app']}"""
+		def helmChartValue = readYaml file: "devops/cd/helmchart/$deployAppName/values.yaml"
+		helmChartValue.microservice.image = """${props['deploy.dockerRegistry']}/${props['deploy.app']}:${props['api.version']}"""
+		helmChartValue.microservice.profile = props['deploy.defaultEnvironment'].replaceAll("\'",""); 
+		helmChartValue.microservice.namespace = """${readconfigfile.propertySources[0].source["kubernetes.namespace"]}"""
+		helmChartValue.microservice.imageSecret = """${props['deploy.dockerSecret']}"""
+		helmChartValue.microservice.configServerURI = """${configserveruri}"""			
+		helmChartValue.microservice.database = """${props['database']}"""
+		helmChartValue.microservice.dataSourcePort = """${props['dataSourcePort']}"""
+		helmChartValue.microservice.dataSourceHost = """${props['dataSourceHost']}"""
+        helmChartValue.microservice.mongodbAuthentication = """${props['mongodbAuthentication']}"""
+        helmChartValue.microservice.kafkaUrl="""${readconfigfile.propertySources[0].source["server.kafka.url"]}"""
+		fileOperations([fileDeleteOperation(excludes: '', includes: "devops/cd/helmchart/$deployAppName/values.yaml")])
+		writeYaml file: "devops/cd/helmchart/$deployAppName/values.yaml", data: helmChartValue
+		
+		def tempFolderName = """${BUILD_TAG}"""
+		println " tempFolderName " + """${tempFolderName}"""
+		sh """
+			echo --- > external_vars.yml
+			echo TARGET_SERVER_IP: ${readconfigfile.propertySources[0].source["kubernetes.environment.URL"]} >> external_vars.yml
+			echo TARGET_SERVER_PASSWORD: ${propsvault['kubernetesVmPassword']} >> external_vars.yml
+			echo TARGET_SERVER_USER: ${propsvault['kubernetesVmUsername']} >> external_vars.yml
+			echo API_NAME: ${props['deploy.app']} >> external_vars.yml
+			echo REGISTRY_HOST_AND_PORT: ${props['deploy.dockerRegistry']} >> external_vars.yml
+			echo IMAGE_TAG: ${props['api.version']} >> external_vars.yml
+			echo PORT_TO_DEPLOY_CONTAINER: ${props['app.port']} >> external_vars.yml
+			echo RUNID: ${props['run.id']} >> external_vars.yml
+			echo FOLDER_NAME: ${tempFolderName} >> external_vars.yml
+			echo NAMESPACE: ${readconfigfile.propertySources[0].source["kubernetes.namespace"]} >> external_vars.yml
+			echo IMPLEMENTATION_TYPE: ${props['api.implementation.type']} >> external_vars.yml
+			echo PORT_TO_DEPLOY_CONTAINER_MICRO: ${props['app.httpsport']} >> external_vars.yml
+			echo DYNAMIC_PORT_UPDATEA_URL: ${propsvault['runManagementIP'].trim()} >> external_vars.yml
+
+			sshpass -p ${propsvault['ansiblePassword']} ssh -o StrictHostKeyChecking=no ${propsvault['ansibleUsername']}@${propsvault['ansibleIP']} mkdir /home/ibmadmin/ansibleDir/${tempFolderName}
+			echo sshpass -p ${propsvault['ansiblePassword']} scp devops/cd/k8s.playbook-template.yml ${propsvault['ansibleUsername']}@${propsvault['ansibleIP']}:/home/ibmadmin/ansibleDir/${tempFolderName}/playbook.yml >> executeDeploymentWithAnsible.sh
+			echo sshpass -p ${propsvault['ansiblePassword']} scp devops/cd/inventory.py ${propsvault['ansibleUsername']}@${propsvault['ansibleIP']}:/home/ibmadmin/ansibleDir/${tempFolderName}/inventory.py >> executeDeploymentWithAnsible.sh
+			echo sshpass -p ${propsvault['ansiblePassword']} scp external_vars.yml ${propsvault['ansibleUsername']}@${propsvault['ansibleIP']}:/home/ibmadmin/ansibleDir/${tempFolderName}/external_vars.yml >> executeDeploymentWithAnsible.sh
+			echo sshpass -p ${propsvault['ansiblePassword']} ssh ${propsvault['ansibleUsername']}@${propsvault['ansibleIP']} chmod 0777 /home/ibmadmin/ansibleDir/${tempFolderName}/inventory.py >> executeDeploymentWithAnsible.sh
+			echo sshpass -p ${propsvault['ansiblePassword']} scp -r ./devops/cd/helmchart ${propsvault['ansibleUsername']}@${propsvault['ansibleIP']}:/home/ibmadmin/ansibleDir/${tempFolderName} >> executeDeploymentWithAnsible.sh
+			echo sshpass -p ${propsvault['ansiblePassword']} ssh ${propsvault['ansibleUsername']}@${propsvault['ansibleIP']} ansible-playbook -i /home/ibmadmin/ansibleDir/${tempFolderName}/inventory.py /home/ibmadmin/ansibleDir/${tempFolderName}/playbook.yml >> executeDeploymentWithAnsible.sh
+			chmod +x executeDeploymentWithAnsible.sh
+			./executeDeploymentWithAnsible.sh
+		"""
+	}
+	catch (e) {
+    	currentBuild.result='FAILURE'
+		sh """rm -rf  credential.properties vault.json"""
+    	//logJIRATicket(currentBuild.result, "At Stage Deploy", props['JIRAprojectid'], props['JIRAissuetype'], commit_Email, props['JIRAissuereporter'])
+    	//notifyBuild(currentBuild.result, "At Stage Deploy", "", commit_Email)
+    	throw e
+    }
+}
+				
+				
+					stage ('Validate Microservice Deployment') { 
+	        try {
+	
+				if("""${stageExecution}""".trim().toUpperCase()!="BUILD") {
+					//sleep 120
+					//echo "check Microservices status"
+					//def chkmicroservice=sh(returnStdout: true, script: """curl -s http://${readconfigfile.propertySources[0].source["docker.environment.URL"]}:${props['app.port']}/health | jq '.status' | tr -d '"' """).trim();
+	/*				echo "check Eureks status"
+					def chkEurekaConnection=sh(returnStdout: true, script: """curl -s http://${readconfigfile.propertySources[0].source["docker.environment.URL"]}}:${props['app.port']}/health | jq '.discoveryComposite.eureka.status' | tr -d '"' """).trim();
+					//echo """status is - ${chkEurekaConnection}"""
+					echo "check DB status"
+					//def chkDBConnection=sh(returnStdout: true, script: """curl -s http://${readconfigfile.propertySources[0].source["docker.environment.URL"]}}:${props['app.port']}/health | jq '.${props['datasource']}.status' | tr -d '"' """).trim();
+					//echo """status is - ${chkDBConnection}"""
+					//echo "check configserver status"
+					//def chkConfigServerConnection=sh(returnStdout: true, script: """curl -s http://${readconfigfile.propertySources[0].source["docker.environment.URL"]}}:${props['app.port']}/health | jq '.configServer.status' | tr -d '"' """).trim();
+					//echo """status is - ${chkConfigServerConnection}"""
+					echo "check hystrix status"
+					def chkHystrixConnection=sh(returnStdout: true, script: """curl -s http://${readconfigfile.propertySources[0].source["docker.environment.URL"]}}:${props['app.port']}/health | jq '.hystrix.status' | tr -d '"' """).trim();
+					//echo """status is - ${chkHystrixConnection}"""
+					echo "check zipkin status"
+					def chkZipkinConnection=sh(returnStdout: true, script: """curl ${readconfigfile.propertySources[0].source["server.zipkin"]}/api/v1/traces?serviceName=${props['deploy.app']}/api/v1/traces?serviceName=${props['deploy.app']} | tr -d '[]' """).trim();
+					//echo """status is - ${chkZipkinConnection}"""
+					echo "check prometheus status"
+					def chkPrometheusConnection=sh(returnStdout: true, script: """curl -sg ${readconfigfile.propertySources[0].source["server.prometheus"]}/api/v1/traces?serviceName=${props['deploy.app']}/api/v1/series?match[]={instance=%22${readconfigfile.propertySources[0].source["docker.environment.URL"]}}:${props['app.port']}%22} | jq '.data[]' > temp; if [ -s temp ]; then echo "true"; else echo "false"; fi""").trim();
+					//echo """status is - ${chkPrometheusConnection}"""
+					def chkDeployment='';
+					/* if(chkmicroservice != "UP")
+					{
+						chkDeployment = chkDeployment + """\n Microservice - ${JOB_NAME} connection failed (Status:${chkmicroservice})"""
+					} */
+				/*	if(chkEurekaConnection != "UP")
+					{
+						chkDeployment = """\n Eureka connection failed (Status:${chkEurekaConnection})"""
+					}
+					if(chkDBConnection != "UP")
+					{
+						chkDeployment = chkDeployment + """\n Database connection failed (Status:${chkDBConnection}) """
+					}
+					//if(chkConfigServerConnection != "UP")
+					//{
+					//	chkDeployment = chkDeployment + """\n connection failed (Status:${chkConfigServerConnection})"""
+					//}
+					if(chkHystrixConnection != "UP")
+					{
+						chkDeployment = chkDeployment + """\n Hystrix connection failed (Status:${chkHystrixConnection})"""
+					}
+					if(chkZipkinConnection == "")
+					{
+						chkDeployment = chkDeployment + """\n Zipkin connection failed (Status:${chkZipkinConnection})"""
+					}
+					if(chkPrometheusConnection == "false")
+					{
+						chkDeployment = chkDeployment + """\n Prometheus connection failed (Status:${chkPrometheusConnection})"""
+					}
+					if (chkDeployment != "")
+					{
+						error ("""\n Warning:\n Microservice deployment is unstable ${chkDeployment} \n """)
+					}*/
+				}
+			}
+			catch (e) {
+				currentBuild.result='FAILURE'
+				sh """rm -rf  credential.properties vault.json"""
+				//logJIRATicket(currentBuild.result, "At Stage Validate Microservice Deployment", props['JIRAprojectid'], props['JIRAissuetype'], commit_Email, props['JIRAissuereporter'])
+				//notifyBuild(currentBuild.result, "At Stage Validate Microservice Deployment", "", commit_Email)
+				echo """${e.getMessage()}"""
+				throw e
+			}
+			catch (error) {
+				currentBuild.result='UNSTABLE'
+				sh """rm -rf  credential.properties vault.json"""
+				////logJIRATicket(currentBuild.result, "At Stage Validate Microservice Deployment", props['JIRAprojectid'], props['JIRAissuetype'], commit_Email, props['JIRAissuereporter'])
+				//notifyBuild(currentBuild.result, "At Stage Validate Microservice Deployment", "", commit_Email)
+				echo """${error.getMessage()}"""
+				//throw e
+			}
+	}
+			
+					stage('Prometheus Target post') {
+			try {
+				if("""${stageExecution}""".trim().toUpperCase()!="BUILD") {
+				
+				    // Get ports where the application is deployed 
+				    def runid = props['run.id']
+				    def endpoints = """${propsvault['runManagementIP'].trim()}"""
+				    sh """curl  http://$endpoints/ports?runId=$runid >sample.json"""
+                    def json=readJSON file: 'sample.json'
+                    httpport = json.http
+					    def targetvalue = """${readconfigfile.propertySources[0].source["kubernetes.environment.URL"]}"""+":"+httpport
+				    def filename = props['deploy.app']+".yaml"
+				    def filename_https = props['deploy.app']+"-Https"+".yaml"
+				    writeFile file: filename , text: 'xyz'
+				 	if(json.https) {
+					 	def httpsport=json.https
+					 	
+					 	
+					     	def targetvaluehttps = """${readconfigfile.propertySources[0].source["kubernetes.environment.URL"]}"""+":"+httpsport
+						 
+					     writeFile file: filename_https , text: 'xyz'
+							sh  """cp -r  /mnt/dipNFSsharedClient/prometheus-development/TargetTemplate.json $filename_https"""
+					     
+					     
+					     def targetjson=readYaml file:"""$filename_https"""
+					     def target=targetjson[0].targets
+					     targetjson[0].labels.name=props['deploy.app']
+					     target.add(targetvaluehttps)
+					     fileOperations([fileDeleteOperation(excludes: '', includes: filename_https)])
+					     writeYaml file: filename_https, data: targetjson
+					     sh  """sudo cp -r $filename_https /mnt/dipNFSsharedClient/prometheus-development/HTTPS"""
+				 }
+				sh  """cp -r  /mnt/dipNFSsharedClient/prometheus-development/TargetTemplate.json $filename"""
+				
+				
+				def targetjson=readYaml file:"""$filename"""
+				def target=targetjson[0].targets
+				targetjson[0].labels.name=props['deploy.app']
+				
+				
+				target.add(targetvalue)
+				fileOperations([fileDeleteOperation(excludes: '', includes: filename)])
+				writeYaml file: filename, data: targetjson
+				sh  """sudo cp -r $filename /mnt/dipNFSsharedClient/prometheus-development/HTTP"""
+				sh """rm -rf sample.json"""
+				}
+			}
+			catch (e) {
+				currentBuild.result='FAILURE'
+				sh """rm -rf  credential.properties vault.json"""
+				//logJIRATicket(currentBuild.result, "At Stage Validate Microservice Deployment", props['JIRAprojectid'], props['JIRAissuetype'], commit_Email, props['JIRAissuereporter'])
+				//notifyBuild(currentBuild.result, "At Stage Validate Microservice Deployment", "", commit_Email)
+				echo """${e.getMessage()}"""
+				throw e
+			}
+	}
+			
+					stage('grafana trigger') {
+			withCredentials([string(credentialsId: 'dev_grafana_api_key', variable: 'grafanaApiKey')]) {
+				try {
+					if("""${stageExecution}""".trim().toUpperCase()!="BUILD") {
+						if(props['PostGrafana'] == 'true') {
+							def grafanajson=readJSON file:"""devops/monitoring/grafanadashboard.json"""
+							def title_name=grafanajson.dashboard.title
+							sh """
+							sudo find . -type f -print0 | xargs -0 dos2unix
+							chmod +x devops/monitoring/postgrafanadashboard.sh""" 
+							sh """./devops/monitoring/postgrafanadashboard.sh "http://${readconfigfile.propertySources[0].source["server.grafana"]}" ${grafanaApiKey} ${props['PostGrafana']} ${title_name}"""
+						}
+						else {
+							echo "Developer Dont Want to Push Json to Grafana"
+						}
+					}
+					sh """rm -rf  credential.properties vault.json"""
+		    	}
+		    	catch (e) {
+					currentBuild.result='FAILURE'
+					sh """rm -rf  credential.properties vault.json"""
+					//logJIRATicket(currentBuild.result, "At Stage Validate Microservice Deployment", props['JIRAprojectid'], props['JIRAissuetype'], commit_Email, props['JIRAissuereporter'])
+					//notifyBuild(currentBuild.result, "At Stage Validate Microservice Deployment", "", commit_Email)
+					echo """${e.getMessage()}"""
+					throw e
+				}
+			}
+	}
+	
+	
+}
+
+//notifyBuild() method declaration.
+def notifyBuild(String buildStatus, String buildFailedAt, String bodyDetails, String commit_Email) {
+			/*buildStatus = buildStatus ?: 'SUCCESS'
+			def details = """Please find attahcment for log and Check console output at ${BUILD_URL}\n \n "${bodyDetails}"
+	\n"""
+			emailext attachLog: true,
+			notifyEveryUnstableBuild: true,
+		recipientProviders: [[$class: 'CulpritsRecipientProvider'], [$class: 'DevelopersRecipientProvider'], [$class: 'RequesterRecipientProvider']],
+			body: details, 
+			subject: """${buildStatus}: Job ${JOB_NAME} [${BUILD_NUMBER}] ${buildFailedAt}""", 
+			to: """sonawasa@in.ibm.com,${commit_Email}"""*/
+}
+
+//logJIRATicket() method declaration.
+def logJIRATicket(String buildStatus, String buildFailedAt, String projectid, String issuetype, String assignTo, String issueReporter) {
+		/*  buildStatus = buildStatus ?: 'SUCCESS'
+		if (buildStatus == 'FAILURE' ){
+			String Title="""${buildStatus} ${buildFailedAt} OF ${JOB_NAME}[${BUILD_NUMBER}]"""
+			withEnv(['JIRA_SITE=Localhost']) {
+			// Look at IssueInput class for more information.
+			def Issue = [fields: [ project: [id: projectid],	
+								summary: Title,
+								description: 'New JIRA Created from Jenkins.',
+								issuetype: [id: issuetype],
+								assignee: [name: assignTo],
+								reporter: [name: issueReporter]]]
+				def Issues = [issueUpdates: [Issue]]
+				response = jiraNewIssues issues: Issues
+				// echo response.successful.toString()
+				// echo response.data.toString()
+				echo """${response}"""
+			}
+		}
+		else {
+			echo "Build is successfull, no JIRA ticket logged."
+		}*/
+}
+
+//getEnvironmentConfig() method declaration.
+
+def getEnvironmentConfig(String mongodbHost, String mongoPort, String mongoUsername, String mongoPassword, String mongoDatabase, String mongoCollection, String defaultEnvironment)
+{
+	try
+	{
+		// build a query to get records from mongodb collection
+		sh """cat  > query.js << EOF 
+					function toPrint(data) {
+					print(JSON.stringify(data, null, 2));
+					}
+					
+					toPrint(
+					db.getCollection('${mongoCollection}').find().toArray()
+					);"""
+		// get config server url from environment mongodb
+		sh """mongo -u ${mongoUsername} -p ${mongoPassword} --authenticationDatabase admin ${mongodbHost}:${mongoPort}/${mongoDatabase} --quiet --norc query.js  | tee my_output.json"""
+		def readEnvironments = readJSON   file: 'my_output.json'
+		def environments = readEnvironments.environment.join(",")
+		//def configserveruri=""
+		environments = environments.tokenize(",")
+		for (i=0; i<environments.size(); i++)
+		{
+			if (defaultEnvironment == environments[i])
+			{
+				echo environments[i]
+				echo """Environment :- ${readEnvironments[i].environment} configserverURL :- ${readEnvironments[i].configserverurl}"""
+				//Get environment configuration urls from config server
+				def configserverstatus=sh(returnStdout: true, script: """curl -s ${readEnvironments[i].configserverurl}/health | jq '.status' | tr -d '"' """).trim();
+				if(configserverstatus != "UP")
+				{
+					eror( """Configserver is not running  (Status:${configserverstatus})""")
+				}
+				else
+				{
+					sh """curl -X GET ${readEnvironments[i].configserverurl}/environment/${environments[i]} -H 'accept: application/json' > config.properties.json"""
+					return "${readEnvironments[i].configserverurl}" + "/"
+				}
+			}
+		}
+	}
+	catch (error)
+	{
+		echo """${error.getMessage()}"""
+		throw error
+	}
+}
